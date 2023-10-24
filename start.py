@@ -165,6 +165,7 @@ def get_system_data(data_dir):
     logging.info(f'[get_system_data] data_dir: {data_dir}')
     get_log_data(data_dir)
     get_metrics_data(data_dir)
+    get_metrics_metadata(data_dir)
     get_trace_data(data_dir)
     get_service_graph_data(data_dir)
     get_k8s_data(data_dir)
@@ -217,6 +218,21 @@ def get_metrics_data(data_dir):
 
     save_json(series_data, data_path)
     logging.info(f'[get_metrics_data] finsh: data saved at {data_path}')
+
+
+def get_metrics_metadata(data_dir):
+    data_path = os.path.join(data_dir, 'metrics', 'metadata.json')
+    logging.info(f'[get_metrics_metadata] start.')
+    prom_api_url = 'http://10.176.122.154:30002/api/v1/metadata'
+
+    response = requests.get(prom_api_url)
+    if response.status_code == 200:
+        metadata = response.json().get('data', {})
+    else:
+        logging.error(f'[get_metrics_metadata] fail: can not fetch metadata.')
+
+    save_json(metadata, data_path)
+    logging.info(f'[get_metrics_metadata] finsh: data saved at {data_path}')
 
 
 def query_trace_detail(trace_id):
