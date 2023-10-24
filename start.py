@@ -325,6 +325,9 @@ def get_k8s_data(data_dir):
                 'svc': svc,
                 'node': node
             }
+        for pod_name in k8s_deploy_info:
+            pod_detail = k8s_v1.read_namespaced_pod(name=pod_name, namespace='default')
+            k8s_deploy_info[pod_name]['containers'] = [i.container_id for i in pod_detail.status.container_statuses] 
         save_json(k8s_deploy_info, data_path)
         logging.info(f'[get_k8s_data] finish: data saved at {data_path}')
     else:
