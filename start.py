@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import os
+import argparse
 import requests
 import subprocess
 import time
@@ -9,10 +10,11 @@ from concurrent.futures import ThreadPoolExecutor
 from kubernetes import client, config
 
 
-WAIT_INTERVAL = 5
+WAIT_INTERVAL = 10
 AUTO_QUERY_DURATION = 60
 AUTO_QUERY_START = None  # set by auto_query, which is the start time to send query to trainticket.
 NUM_THREADS = 3
+WARM_QUERY_DURATION = 60
 
 config.load_kube_config()
 k8s_v1 = client.CoreV1Api()
@@ -120,22 +122,15 @@ def wait(duration):
     logging.info(f'[wait] finish.')
 
 
-def auto_query(duration):
-    global AUTO_QUERY_START
-    logging.info(f'[auto_query] start, total {duration} seconds.')
-    if not os.path.exists('./log/autoQuery'):
-        os.makedirs('./log/autoQuery')
-    st_time = datetime.datetime.now() 
-    AUTO_QUERY_START = st_time
-    formatted_st_time = st_time.strftime("%Y-%m-%d %H:%M:%S")
-    ed_time = st_time + datetime.timedelta(seconds=duration)
-    formatted_ed_time = ed_time.strftime("%Y-%m-%d %H:%M:%S")
+def query(query_type, formatted_st_time, formatted_ed_time):
+    if not os.path.exists(f'./log/{query_type}'):
+        os.makedirs(f'./log/{query_type}')
     cmds = [
-        f'python3 ./autoQuery/scenarioApi.py scenario_admin 0 0.1 {formatted_ed_time} &> ./log/autoQuery/scenario_admin.log',
-        f'python3 ./autoQuery/scenarioApi.py scenario_1 0 0.2 {formatted_ed_time} &> ./log/autoQuery/scenario_1.log',
-        f'python3 ./autoQuery/scenarioApi.py scenario_2 0 0.2 {formatted_ed_time} &> ./log/autoQuery/scenario_2.log',
-        f'python3 ./autoQuery/scenarioApi.py scenario_3 0 0.2 {formatted_ed_time} &> ./log/autoQuery/scenario_3.log',
-        f'python3 ./autoQuery/scenarioApi.py scenario_4 0 0.2 {formatted_ed_time} &> ./log/autoQuery/scenario_4.log'
+        f'python3 ./autoQuery/scenarioApi.py scenario_admin 0 0.1 {formatted_ed_time} &> ./log/{query_type}/scenario_admin.log',
+        f'python3 ./autoQuery/scenarioApi.py scenario_1 0 0.2 {formatted_ed_time} &> ./log/{query_type}/scenario_1.log',
+        f'python3 ./autoQuery/scenarioApi.py scenario_2 0 0.2 {formatted_ed_time} &> ./log/{query_type}/scenario_2.log',
+        f'python3 ./autoQuery/scenarioApi.py scenario_3 0 0.2 {formatted_ed_time} &> ./log/{query_type}/scenario_3.log',
+        f'python3 ./autoQuery/scenarioApi.py scenario_4 0 0.2 {formatted_ed_time} &> ./log/{query_type}/scenario_4.log'
     ]
 
     query_processes = []
@@ -152,13 +147,33 @@ def auto_query(duration):
     for query_process in query_processes:
         return_code = query_process.wait()
         if return_code == 0:
-            logging.info(f'[auto_query] {query_process.pid} exit with {return_code}.')
+            logging.info(f'[{query_type}] {query_process.pid} exit with {return_code}.')
         else:
             query_success = False
-            logging.error(f'[auto_query] {query_process.pid} exit with {return_code}.')
+            logging.error(f'[{query_type}] {query_process.pid} exit with {return_code}.')
     
-    logging.info(f'[auto_query] finish, start: {formatted_st_time}, end: {formatted_ed_time}')
+    logging.info(f'[{query_type}] finish, start: {formatted_st_time}, end: {formatted_ed_time}')
     return query_success
+
+
+def warm_query(duration):
+    logging.info(f'[warm_query] start, total {duration} seconds.')
+    st_time = datetime.datetime.now() 
+    formatted_st_time = st_time.strftime("%Y-%m-%d %H:%M:%S")
+    ed_time = st_time + datetime.timedelta(seconds=duration)
+    formatted_ed_time = ed_time.strftime("%Y-%m-%d %H:%M:%S")
+    return query('warm_query', formatted_st_time, formatted_ed_time)
+
+
+def auto_query(duration):
+    global AUTO_QUERY_START
+    logging.info(f'[auto_query] start, total {duration} seconds.')
+    st_time = datetime.datetime.now() 
+    AUTO_QUERY_START = st_time
+    formatted_st_time = st_time.strftime("%Y-%m-%d %H:%M:%S")
+    ed_time = st_time + datetime.timedelta(seconds=duration)
+    formatted_ed_time = ed_time.strftime("%Y-%m-%d %H:%M:%S")
+    return query('auto_query', formatted_st_time, formatted_ed_time)
 
 
 def get_system_data(data_dir):
@@ -319,19 +334,53 @@ def get_k8s_data(data_dir):
 def main():
     if not os.path.exists('./log'):
         os.makedirs('./log')
+
     if not check_pods_status():
         logging.error('[main] exit after check_pods_status.')
         return
+
+    # Warm trainticket
     if not tsdb_recover():
         logging.error('[main] exit after tsdb_recover.')
         return
     wait(WAIT_INTERVAL)
+    if WARM_QUERY_DURATION != 0 and not warm_query(WARM_QUERY_DURATION):
+        logging.error('[main] exit after warm_query.')
+        return
+    wait(WAIT_INTERVAL)
+    if not tsdb_recover():
+        logging.error('[main] exit after tsdb_recover.')
+        return
+    wait(WAIT_INTERVAL)
+
+    # Auto query
     if not auto_query(AUTO_QUERY_DURATION):
         logging.error('[main] exit after auto_query.')
         return
     wait(WAIT_INTERVAL)
+
+    # Get data
     get_system_data('./data')
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Generate data to build KG.')
+    
+    parser.add_argument('--wait-interval', type=int, nargs='?', const=10, default=10, help='Interval between each steps.')
+    parser.add_argument('--auto-query-duration', type=int, nargs='?', const=60, default=60, help='Duration of auto query trainticket.')
+    parser.add_argument('--trace-collect-num-threads', type=int, nargs='?', const=3, default=3, help='Number of threads to collect trace data from tempo api.')
+    parser.add_argument('--warm-query-duration', type=int, nargs='?', const=60, default=60, help='Duration of warmming trainticket.')
+    
+    args = parser.parse_args()
+    
+    WAIT_INTERVAL = args.wait_interval
+    AUTO_QUERY_DURATION = args.auto_query_duration
+    NUM_THREADS = args.trace_collect_num_threads
+    WARM_QUERY_DURATION = args.warm_query_duration 
+    
+    logging.info(f'WAIT_INTERVAL = {WAIT_INTERVAL}s')
+    logging.info(f'AUTO_QUERY_DURATION = {AUTO_QUERY_DURATION}s')
+    logging.info(f'NUM_THREADS = {NUM_THREADS}')
+    logging.info(f'WARM_QUERY_DURATION = {WARM_QUERY_DURATION}s')
+    
     main()
