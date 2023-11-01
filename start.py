@@ -18,6 +18,7 @@ WARM_QUERY_DURATION = 60
 
 config.load_kube_config()
 k8s_v1 = client.CoreV1Api()
+k8s_apps_v1 = client.AppsV1Api()
 
 if not os.path.exists('./log'):
     os.makedirs('./log')
@@ -294,45 +295,106 @@ def get_service_graph_data(data_dir):
     logging.warning(f'[get_service_graph_data] not implemented yet.')
 
 
-def get_k8s_data(data_dir):
-    data_path = os.path.join(data_dir, 'k8s', 'deploy_info.json')
+def get_pod_data(data_dir, namespace='default'):
+    data_path = os.path.join(data_dir, 'k8s', 'pod_info.json')
     logging.info(f'[get_k8s_data] start.')
-    namespace = 'default'
-    get_pod_svc_cmd = f'kubectl get pods -n {namespace} -o custom-columns="POD:.metadata.name,Service:.metadata.ownerReferences[0].name" | tail -n +2'
-    get_pod_node_cmd = f'kubectl get pods -n {namespace} -o custom-columns="POD:.metadata.name,Node:.spec.nodeName" | tail -n +2'
-    pod_svc_results = shell_exec(get_pod_svc_cmd)
-    pod_node_results = shell_exec(get_pod_node_cmd)
+    pods = k8s_v1.list_namespaced_pod(namespace=namespace)
+    pods_info = {}
+    for pod in pods.items:    
+        pod_info = {
+            'namespace': pod.metadata.namespace,
+            'pod_name': pod.metadata.name,
+            'pod_ip': pod.status.pod_ip,
+            'app': pod.metadata.labels.get('app', ''),
+            'node_name': pod.spec.node_name,
+            'node_ip': pod.status.host_ip,
+            'containers': [{'container_id': i.container_id, 'container_name': i.name} for i in pod.status.container_statuses],
+        }
+        pods_info[pod.metadata.name] = pod_info
+    save_json(pods_info, data_path)
+    logging.info(f'[get_k8s_data pod_info] finish: data saved at {data_path}')
 
-    success = True
-    if pod_svc_results['code'] != 0:
-        logging.error(f'[get_k8s_data] fail to fetch pod--svc information in {namespace} namespace.')
-        success = False
-    if pod_node_results['code'] != 0:
-        logging.error(f'[get_k8s_data] fail to fetch pod--node information in {namespace} namespace.')
-        success = False
 
-    k8s_deploy_info = {}
-    if success:
-        pod_svc = pod_svc_results['stdout'].split('\n')
-        pod_node = pod_node_results['stdout'].split('\n')
-        for ps, pn in zip(pod_svc, pod_node):
-            if not ps or not pn:
-                continue
-            pod1, svc = ps.split()
-            pod2, node = pn.split()
-            assert pod1 == pod2, '[get_k8s_data] This should not happen.'
-            k8s_deploy_info[pod1] = {
-                'svc': svc,
-                'node': node
-            }
-        for pod_name in k8s_deploy_info:
-            pod_detail = k8s_v1.read_namespaced_pod(name=pod_name, namespace='default')
-            k8s_deploy_info[pod_name]['containers'] = [i.container_id for i in pod_detail.status.container_statuses] 
-        save_json(k8s_deploy_info, data_path)
-        logging.info(f'[get_k8s_data] finish: data saved at {data_path}')
-    else:
-        logging.error(f'[get_k8s_data] finsh: can not fetch k8s deploy data.')
+def get_svc_data(data_dir, namespace='default'):
+    data_path = os.path.join(data_dir, 'k8s', 'svc_info.json')
+    svc_info = {}
+    svcs = k8s_v1.list_namespaced_service(namespace=namespace)
+    for svc in svcs.items:
+        selector = svc.spec.selector
+        if not selector:
+            continue
+        info = {
+            'name': svc.metadata.name,
+            'namespace': svc.metadata.namespace,
+            'pods': [pod.metadata.name for pod in k8s_v1.list_namespaced_pod(namespace, label_selector=','.join(f'{key}={value}' for key, value in selector.items())).items]
+        }
+        svc_info[svc.metadata.name] = info
 
+    save_json(svc_info, data_path)
+    logging.info(f'[get_k8s_data svc_info] finish: data saved at {data_path}')
+
+
+def get_deploy_data(data_dir, namespace='default'):
+    data_path = os.path.join(data_dir, 'k8s', 'deploy_info.json')
+    deploy_info = {}
+    deploys = k8s_apps_v1.list_namespaced_deployment(namespace=namespace)
+    for deploy in deploys.items:
+        replica_set_names = []
+        selector = ",".join([f"{key}={value}" for key, value in deploy.spec.selector.match_labels.items()])
+        replica_sets = k8s_apps_v1.list_namespaced_replica_set(namespace, label_selector=selector)
+        for rs in replica_sets.items:
+            replica_set_names.append(rs.metadata.name)
+        info = {
+            'name': deploy.metadata.name,
+            'namespace': deploy.metadata.namespace,
+            'replicaset': replica_set_names,
+        }
+        deploy_info[deploy.metadata.name] = info
+    save_json(deploy_info, data_path)
+    logging.info(f'[get_k8s_data deploy_info] finish: data saved at {data_path}')
+
+
+def get_replicaset_data(data_dir, namespace='default'):
+    data_path = os.path.join(data_dir, 'k8s', 'replicaset_info.json')
+    replicaset_info = {}
+    reps = k8s_apps_v1.list_namespaced_replica_set(namespace=namespace)
+    for rep in reps.items:
+        selector = ",".join([f"{key}={value}" for key, value in rep.spec.selector.match_labels.items()])
+        info = {
+            'name': rep.metadata.name,
+            'namespace': rep.metadata.namespace,
+            'pods': [i.metadata.name for i in k8s_v1.list_namespaced_pod(namespace, label_selector=selector).items]
+        }
+        replicaset_info[rep.metadata.name] = info 
+
+    save_json(replicaset_info, data_path)
+    logging.info(f'[get_k8s_data replicaset_info] finish: data saved at {data_path}')
+
+
+def get_statefulset_data(data_dir, namespace='default'):
+    data_path = os.path.join(data_dir, 'k8s', 'statefulset_info.json')
+    statefulset_info = {}
+    sfs = k8s_apps_v1.list_namespaced_stateful_set(namespace=namespace)
+    for sf in sfs.items:
+        selector = ",".join([f"{key}={value}" for key, value in sf.spec.selector.match_labels.items()])
+        info = {
+            'name': sf.metadata.name,
+            'namespace': sf.metadata.namespace,
+            'pods': [i.metadata.name for i in k8s_v1.list_namespaced_pod(namespace, label_selector=selector).items]
+        }
+        statefulset_info[sf.metadata.name] = info 
+    
+    save_json(statefulset_info, data_path)
+    logging.info(f'[get_k8s_data statefulset_info] finish: data saved at {data_path}')
+
+
+def get_k8s_data(data_dir):
+    get_pod_data(data_dir)
+    get_svc_data(data_dir)
+    get_deploy_data(data_dir)
+    get_replicaset_data(data_dir)
+    get_statefulset_data(data_dir)
+ 
 
 def main():
     if not os.path.exists('./log'):
